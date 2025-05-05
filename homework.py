@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 import time
@@ -11,6 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+LOG_FILE_PATH = os.path.join(os.path.expanduser('~'), 'bot.log')
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -20,7 +22,6 @@ RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
-
 HOMEWORK_VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
     'reviewing': 'Работа взята на проверку ревьюером.',
@@ -29,101 +30,172 @@ HOMEWORK_VERDICTS = {
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler(stream=sys.stdout)
+
 formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+
+file_handler = RotatingFileHandler(
+    LOG_FILE_PATH,
+    maxBytes=50000000,
+    backupCount=5,
+    encoding='utf-8'
+)
+
+file_handler.setFormatter(formatter)
+file_handler.setLevel(logging.INFO)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+console_handler.setLevel(logging.INFO)
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 
-def check_tokens():
+def check_tokens(tokens):
     """Проверяет наличие переменных окружения."""
-    tokens = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-    return all(tokens)
+    missing_tokens = []
+    for token in tokens:
+        if not token:
+            missing_tokens.append(token)
+
+    if missing_tokens:
+        logging.warning(
+            f'Отсутствуют токены: {missing_tokens}'
+        )
+        return False
+    return True
 
 
 def send_message(bot, message):
     """Отправляет сообщение в Telegram-чат."""
     try:
-        bot.send_message(TELEGRAM_CHAT_ID, message)
-        logger.debug(f'Бот отправил сообщение: {message}')
-    except Exception as e:
-        logger.error(f'Ошибка при отправке сообщения: {e}')
+        logging.debug(f'Бот отправляет сообщение: {message}')
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+
+    except (telebot.apihelper.ApiException, requests.RequestException) as e:
+        logger.error(f'Бот не смог отправить сообщение: {e}')
+
+
+class APIResponseError(Exception):
+    """Класс для обработки ошибок в ответе API-сервиса Яндекс.Практикум."""
+
+    pass
 
 
 def get_api_answer(timestamp):
     """Делает запрос к API-сервиса Яндекс.Практикум."""
-    params = {'from_date': timestamp}
     try:
-        response = requests.get(
-            ENDPOINT,
-            headers=HEADERS,
-            params=params
+        logger.debug(
+            f'Бот делает запрос к API-сервису Яндекс.Практикум: {ENDPOINT}'
         )
+        request_kwargs = {
+            'url': ENDPOINT,
+            'headers': HEADERS,
+            'params': {'from_date': timestamp}
+        }
+        response = requests.get(**request_kwargs)
+
+        if response.status_code == HTTPStatus.OK:
+            logger.info('Бот получил ответ от API-сервиса Яндекс.Практикум')
+            return response.json()
+
         if response.status_code != HTTPStatus.OK:
-            raise Exception(
-                f'Код ответа API: {response.status_code}'
+            logger.error(
+                f'При запросе к API возникла ошибка: {response.status_code}'
             )
-        return response.json()
-    except Exception as e:
-        raise ConnectionError(f'Ошибка при запросе к API: {e}')
+            raise APIResponseError(
+                f'Ошибка при запросе к API-сервису Яндекс.Практикум '
+                f'URL: {ENDPOINT}',
+                f'Параметры: {request_kwargs["params"]}',
+                f'Код ошибки: {response.status_code}'
+            )
+
+    except requests.RequestException as e:
+        logger.error(
+            f'Бот не смог получить ответ от API-сервиса Яндекс.Практикум: {e}'
+        )
+        return None
 
 
 def check_response(response):
     """Проверяет корректность ответа API."""
     if not isinstance(response, dict):
+        logger.error('Ответ API не является словарем')
         raise TypeError('Ответ API не является словарем')
-    if 'homeworks' not in response or 'current_date' not in response:
-        raise KeyError('В ответе API нет ключей homeworks или current_date')
+
+    if 'homeworks' not in response:
+        logger.error('Ответ API не содержит ключа "homeworks"')
+        raise KeyError('Ответ API не содержит ключа "homeworks"')
+
     if not isinstance(response['homeworks'], list):
-        raise TypeError('homeworks не список!')
+        logger.error('Значение ключа "homeworks" не является списком')
+        raise TypeError('Значение ключа "homeworks" не является списком')
+
     return response['homeworks']
 
 
 def parse_status(homework):
-    """Извлекает из ответа API нужную информацию."""
-    if 'homework_name' not in homework or 'status' not in homework:
-        raise KeyError('homework_name или status отсутствуют в ответе API')
-    name = homework['homework_name']
-    status = homework['status']
-    verdict = HOMEWORK_VERDICTS.get(status)
-    if verdict is None:
-        raise KeyError('Неизвестный статус домашней работы')
-    return f'Изменился статус проверки работы "{name}". {verdict}'
+    """Излекает информацию о конкретной домашней работе."""
+    """Статусы этой домашки."""
+    logging.debug(
+        f'Бот извлекает информацию о конкретной домашней работе: {homework}'
+    )
+    homework_name = homework.get('homework_name')
+    homework_status = homework.get('status')
+
+    if homework_name and homework_status:
+        verdict = HOMEWORK_VERDICTS.get(homework_status)
+        if not verdict:
+            logger.error('Вердикт не определен')
+            raise ValueError(
+                f'Вердикт не определен '
+                f'статус домашки: {homework_status}'
+            )
+    else:
+        logger.error('Отсутствует имя или статус домашки')
+        raise KeyError(
+            'Отсутствует имя или статус домашки'
+        )
+
+    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
-    if not check_tokens():
+    if not check_tokens([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
         logger.critical('Отсутствуют переменные окружения')
         sys.exit()
 
     # Создаем объект класса бота
-    bot = telebot.TeleBot(TELEGRAM_TOKEN)
-    timestamp = int(time.time())
+    bot = telebot.TeleBot(token=TELEGRAM_TOKEN)
+    timestamp1 = int(time.time())
     last_message = ''  # Переменная для хранения последнего сообщения
 
     while True:
         try:
-            response = get_api_answer(timestamp)
+            response = get_api_answer(timestamp1)
             homeworks = check_response(response)
-            if homeworks:
+            timestamp2 = response.get('current_date')
+            if homeworks and timestamp1 != timestamp2:
+                timestamp1 = timestamp2
                 message = parse_status(homeworks[0])
-                if message != last_message:
+                send_message(bot, message)
+        except Exception as error:
+            message = f'Сбой в работе программы: {error}'
+            if message != last_message:
+                try:
                     send_message(bot, message)
                     last_message = message
-            else:
-                logger.debug('Нет новых статусов')
-            timestamp = response.get('current_date', timestamp)
-
-        except Exception as error:
-            message = f'Сбой в работе программы: {error}'
+                except Exception as send_err:
+                    logger.error(
+                        f'Ошибка при попытке отправить сообщение: {send_err}'
+                    )
             logger.error(message)
-            if message != last_message:
-                send_message(message)
-                last_message = message
-        time.sleep(RETRY_PERIOD)
+
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
