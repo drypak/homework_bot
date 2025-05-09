@@ -9,6 +9,8 @@ import requests
 import telebot
 from dotenv import load_dotenv
 
+from exceptions import APIResponseError, ApiAnswerException
+
 
 load_dotenv()
 
@@ -73,50 +75,39 @@ def send_message(bot, message):
     try:
         logging.debug(f'Бот отправляет сообщение: {message}')
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-
     except (telebot.apihelper.ApiException, requests.RequestException) as e:
         logger.error(f'Бот не смог отправить сообщение: {e}')
-
-
-class APIResponseError(Exception):
-    """Класс для обработки ошибок в ответе API-сервиса Яндекс.Практикум."""
-
-    pass
+        raise
 
 
 def get_api_answer(timestamp):
     """Делает запрос к API-сервиса Яндекс.Практикум."""
+    request_kwargs = {
+        'url': ENDPOINT,
+        'headers': HEADERS,
+        'params': {'from_date': timestamp}
+    }
+
     try:
         logger.debug(
             f'Бот делает запрос к API-сервису Яндекс.Практикум: {ENDPOINT}'
         )
-        request_kwargs = {
-            'url': ENDPOINT,
-            'headers': HEADERS,
-            'params': {'from_date': timestamp}
-        }
         response = requests.get(**request_kwargs)
-
-        if response.status_code == HTTPStatus.OK:
-            logger.info('Бот получил ответ от API-сервиса Яндекс.Практикум')
-            return response.json()
-
         if response.status_code != HTTPStatus.OK:
-            logger.error(
-                f'При запросе к API возникла ошибка: {response.status_code}'
-            )
             raise APIResponseError(
-                f'Ошибка при запросе к API-сервису Яндекс.Практикум '
-                f'URL: {ENDPOINT}',
-                f'Параметры: {request_kwargs["params"]}',
-                f'Код ошибки: {response.status_code}'
+                f'Ошибка при запросе к API-сервису '
+                f'URL: {ENDPOINT}'
+                f'Параметры: {request_kwargs}',
+                f'Код ошкибки: {response.status_code}'
             )
+        logger.info(
+            'Бот получил ответ от API-сервиса Яндекс.Практикум'
+        )
+        return response.json()
 
     except requests.RequestException as e:
-        logger.error(
-            f'Бот не смог получить ответ от API-сервиса Яндекс.Практикум: {e}'
-        )
-        return None
+        logger.error(f'Бот не смог получить ответ от API-сервиса: {e}')
+        raise ApiAnswerException(f'Ошибка при запросе к API-сервису: {e}')
 
 
 def check_response(response):
@@ -145,55 +136,71 @@ def parse_status(homework):
     homework_name = homework.get('homework_name')
     homework_status = homework.get('status')
 
-    if homework_name and homework_status:
-        verdict = HOMEWORK_VERDICTS.get(homework_status)
-        if not verdict:
-            logger.error('Вердикт не определен')
-            raise ValueError(
-                f'Вердикт не определен '
-                f'статус домашки: {homework_status}'
-            )
-    else:
-        logger.error('Отсутствует имя или статус домашки')
-        raise KeyError(
-            'Отсутствует имя или статус домашки'
-        )
+    if not homework_name:
+        logger.error('Отсутствует название домашней работы')
+        raise KeyError('homework_name отсутствует')
+
+    if not homework_status:
+        logger.error('Отсутствует статус домашней работы')
+        raise KeyError('status отсутствует')
+
+    verdict = HOMEWORK_VERDICTS.get(homework_status)
+    if not verdict:
+        logger.error('Вердикт отсутствует')
+        raise ValueError('Вердикт отсутствует')
 
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
-    if not check_tokens([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
-        logger.critical('Отсутствуют переменные окружения')
+    tokens = {
+        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
+        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
+        'PRACTICUM_TOKEN': PRACTICUM_TOKEN
+    }
+    missing_tokens = [
+        name for name, value in tokens.items() if not value
+    ]
+    if missing_tokens:
+        logging.critical(
+            f'Отсутствуют переменные окружения: {", ".join(missing_tokens)}'
+        )
         sys.exit()
-
     # Создаем объект класса бота
     bot = telebot.TeleBot(token=TELEGRAM_TOKEN)
-    timestamp1 = int(time.time())
+    timestamp = int(time.time())
     last_message = ''  # Переменная для хранения последнего сообщения
 
     while True:
         try:
-            response = get_api_answer(timestamp1)
+            response = get_api_answer(timestamp)
             homeworks = check_response(response)
-            timestamp2 = response.get('current_date')
-            if homeworks and timestamp1 != timestamp2:
-                timestamp1 = timestamp2
+            if homeworks:
                 message = parse_status(homeworks[0])
-                send_message(bot, message)
+                if message != last_message:
+                    try:
+                        send_message(bot, message)
+                        last_message = message
+                    except Exception as send_err:
+                        logging.error(
+                            f'Ошибка при попытке отправить сообщение: '
+                            F'{send_err}'
+                        )
+            else:
+                logging.debug('Список домашних работ пуст')
+            timestamp = response.get('current_date', timestamp)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
+            logging.error(message)
             if message != last_message:
                 try:
                     send_message(bot, message)
                     last_message = message
                 except Exception as send_err:
-                    logger.error(
+                    logging.error(
                         f'Ошибка при попытке отправить сообщение: {send_err}'
                     )
-            logger.error(message)
-
         finally:
             time.sleep(RETRY_PERIOD)
 
