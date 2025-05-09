@@ -16,6 +16,7 @@ load_dotenv()
 
 LOG_FILE_PATH = os.path.join(os.path.expanduser('~'), 'bot.log')
 
+
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -55,18 +56,17 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 
-def check_tokens(tokens):
+def check_tokens():
     """Проверяет наличие переменных окружения."""
-    missing_tokens = []
-    for token in tokens:
-        if not token:
-            missing_tokens.append(token)
+    missing_tokens = [name for name, value in [
+        ('PRACTICUM_TOKEN', PRACTICUM_TOKEN),
+        ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
+        ('TELEGRAM_CHAT_ID', TELEGRAM_CHAT_ID)
+    ] if not value]
 
     if missing_tokens:
-        logging.warning(
-            f'Отсутствуют токены: {missing_tokens}'
-        )
-        return False
+        raise ValueError(
+            f'Отсутствуют переменные окружения: {", ".join(missing_tokens)}')
     return True
 
 
@@ -152,20 +152,22 @@ def parse_status(homework):
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
+def send_message_safe(bot, message):
+    """Попытка отправки сообщения и логирует ошибки."""
+    try:
+        send_message(bot, message)
+    except Exception as send_err:
+        logging.error(
+            f'Ошибка при попытке отправить сообщение: {send_err}'
+        )
+
+
 def main():
     """Основная логика работы бота."""
-    tokens = {
-        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
-        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
-        'PRACTICUM_TOKEN': PRACTICUM_TOKEN
-    }
-    missing_tokens = [
-        name for name, value in tokens.items() if not value
-    ]
-    if missing_tokens:
-        logging.critical(
-            f'Отсутствуют переменные окружения: {", ".join(missing_tokens)}'
-        )
+    try:
+        check_tokens()
+    except ValueError as e:
+        logger.critical(f'Отсутствуют переменные окружения: {e}')
         sys.exit()
     # Создаем объект класса бота
     bot = telebot.TeleBot(token=TELEGRAM_TOKEN)
@@ -178,29 +180,22 @@ def main():
             homeworks = check_response(response)
             if homeworks:
                 message = parse_status(homeworks[0])
-                if message != last_message:
-                    try:
-                        send_message(bot, message)
-                        last_message = message
-                    except Exception as send_err:
-                        logging.error(
-                            f'Ошибка при попытке отправить сообщение: '
-                            F'{send_err}'
-                        )
             else:
-                logging.debug('Список домашних работ пуст')
+                message = 'Домашних работ нет'
+                logging.debug(message)
+
+            if message != last_message:
+                send_message_safe(bot, message)
+                last_message = message
+
             timestamp = response.get('current_date', timestamp)
+
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
             if message != last_message:
-                try:
-                    send_message(bot, message)
-                    last_message = message
-                except Exception as send_err:
-                    logging.error(
-                        f'Ошибка при попытке отправить сообщение: {send_err}'
-                    )
+                send_message_safe(bot, message)
+                last_message = message
         finally:
             time.sleep(RETRY_PERIOD)
 
