@@ -8,3 +8,7 @@ class ApiRequestException(APIResponseError):
 
 class SendMessageError(APIResponseError):
     """Исключение для ошибок при отправке сообщения."""
+
+
+class UnknownHomeworkStatusError(APIResponseError):
+    """Исключение для неизвестного статуса домашней работы."""

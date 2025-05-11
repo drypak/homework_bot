@@ -9,7 +9,11 @@ import requests
 import telebot
 from dotenv import load_dotenv
 
-from exceptions import APIResponseError, SendMessageError, ApiRequestException
+from exceptions import (
+    SendMessageError,
+    ApiRequestException,
+    UnknownHomeworkStatusError
+)
 
 
 load_dotenv()
@@ -65,7 +69,7 @@ def check_tokens():
     ] if not value]
 
     if missing_tokens:
-        logger.error(
+        logger.critical(
             f'Отсутствуют переменные окружения: {", ".join(missing_tokens)}'
         )
         return False
@@ -96,14 +100,16 @@ def get_api_answer(timestamp):
 
     try:
         response = requests.get(**request_kwargs)
-        if response.status_code != HTTPStatus.OK:
-            raise APIResponseError(f'API вернул код {response.status_code}')
-        logger.info(
-            'Бот получил ответ от API-сервиса'
-        )
-        return response.json()
     except requests.RequestException as e:
-        raise ApiRequestException(f'Ошибка при запросе к API: {e}')
+        raise ApiRequestException(
+            f'Ошибка при запросе к API: {e}'
+        )
+    if response .status_code != HTTPStatus.OK:
+        raise ApiRequestException(
+            f'API вернул код ответа: {response.status_code}'
+        )
+    logger.info('Бот получил ответ от API')
+    return response.json()
 
 
 def check_response(response):
@@ -130,17 +136,17 @@ def parse_status(homework):
     homework_status = homework.get('status')
 
     if homework_name is None:
-        raise KeyError('Отсутствует название домашней работы')
+        raise ValueError('Отсутствует название домашней работы')
 
     if homework_status is None:
-        raise KeyError('Отсутствует статус домашней работы')
+        raise ValueError('Отсутствует статус домашней работы')
 
     if homework_status not in HOMEWORK_VERDICTS:
-        raise APIResponseError(
+        raise UnknownHomeworkStatusError(
             f'Неизвестный статус домашней работы: {homework_status}'
         )
-    verdict = HOMEWORK_VERDICTS[homework_status]
 
+    verdict = HOMEWORK_VERDICTS[homework_status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
@@ -166,18 +172,18 @@ def main():
                 logging.debug(message)
 
             if message != last_message:
-                try:
-                    send_message(bot, message)
-                    last_message = message
-                    logger.info(f'Бот отправил сообщение: {message}')
-                except SendMessageError as send_err:
-                    logger.error(f'Ошибка при отправке сообщения: {send_err}')
+                send_message(bot, message)
+                last_message = message
+                logger.info(f'Бот отправил сообщение: {message}')
+
+        except SendMessageError as send_err:
+            logger.error(f'Ошибка отправки сообщения: {send_err}')
 
             timestamp = response.get('current_date', timestamp)
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logging.error(message)
+            logger.error(message)
             if message != last_message:
                 send_message(bot, message)
                 last_message = message
