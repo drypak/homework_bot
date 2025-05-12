@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 from exceptions import (
     SendMessageError,
     ApiRequestException,
-    UnknownHomeworkStatusError
+    UnknownHomeworkStatusError,
+    APIResponseError
 )
 
 
@@ -105,7 +106,7 @@ def get_api_answer(timestamp):
             f'Ошибка при запросе к API: {e}'
         )
     if response .status_code != HTTPStatus.OK:
-        raise ApiRequestException(
+        raise APIResponseError(
             f'API вернул код ответа: {response.status_code}'
         )
     logger.info('Бот получил ответ от API')
@@ -132,14 +133,14 @@ def parse_status(homework):
     logging.debug(
         f'Бот извлекает информацию о конкретной домашней работе: {homework}'
     )
-    homework_name = homework.get('homework_name')
-    homework_status = homework.get('status')
-
-    if homework_name is None:
+    if 'homework_name' not in homework:
         raise ValueError('Отсутствует название домашней работы')
 
-    if homework_status is None:
+    if 'status' not in homework:
         raise ValueError('Отсутствует статус домашней работы')
+
+    homework_name = homework['homework_name']
+    homework_status = homework['status']
 
     if homework_status not in HOMEWORK_VERDICTS:
         raise UnknownHomeworkStatusError(
@@ -176,10 +177,10 @@ def main():
                 last_message = message
                 logger.info(f'Бот отправил сообщение: {message}')
 
+            timestamp = response.get('current_date', timestamp)
+
         except SendMessageError as send_err:
             logger.error(f'Ошибка отправки сообщения: {send_err}')
-
-            timestamp = response.get('current_date', timestamp)
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
